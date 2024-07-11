@@ -121,50 +121,86 @@ def main(args=None):
 
     # Define constants
     DT = 0.1  # Time step
-    N = 20    # Horizon length
-
-    # Define symbolic variables
-    x = MX.sym('x')      # Robot position x
-    y = MX.sym('y')      # Robot position y
-    theta = MX.sym('theta')  # Robot orientation
-    v = 2.0                  # Constant forward speed (adjust as needed)
+    N = 20    # Horizon length # 2s
 
 
     # Set up the optimization problem
     opti = Opti()
     
-    
-    # Reference point (desired position to follow)
-    ref_x = opti.parameter()  # Reference x position
-    ref_y = opti.parameter()  # Reference y position
+    # Gamma - point on the path quantifying where on the path we want to be at the moment. 0-start.
+    gamma = opti.parameter(); opti.set_value(gamma, 0) # Desired forward velocity
 
     
-    # Decision variables (to be optimized)
+    # Vehicle
     X = opti.variable(3, N+1)  # State trajectory variables (x, y, theta)
-    U = opti.variable(1, N)    # Control trajectory variable (omega)
+    r = opti.variable(1, N)    # Control trajectory variable (omega)
+    v = opti.parameter(); opti.set_value(v, 1.0) # Desired forward velocity
+    
+    # Point
+    X_p = opti.variable(3, N+1)  # State trajectory variables (x, y, theta)
+    v_p = opti.variable(1, N)    # Linear speed of the path
+    
+    # Position and rotation errors
+    e_p   = opti.variable(2, N+1)
+    psi_e = opti.variable(1, N+1)
+    
+    # Whole Error
+    error_tp = opti.variable(3, N+1)
+
+    # Curvature
+    curvature = opti.variable(1, N)
+    
+    # Weights
+    weights_Q = opti.parameter(3, 3)
+    opti.set_value(weights_Q, DM([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]))
+    weights_R = opti.parameter(2, 2)
+    opti.set_value(weights_R, DM([[1.0, 0.0], [0.0, 1.0]]))
+
+    
+    # Cost associated with the input
+    u_a = opti.variable(2, N)
+    
 
     # Initial state
-    opti.subject_to(X[:, 0] == [2.0, 0.0, 0.0])  # Initial position and orientation of the robot
+    opti.subject_to(X[:, 0] == [1.1, 0, 0])  # Initial position and orientation of the robot
+    opti.subject_to(X_p[:, 0] == [3.4, 2.4, 0.785])  # Initial position and orientation of the robot
+    
+    opti.subject_to(e_p[:, 0] == vertcat(horzcat(cos(X_p[2, 0]), sin(X_p[2, 0])), horzcat(-sin(X_p[2, 0]), cos(X_p[2, 0]))) @ (X[0:2, 0] - X_p[0:2, 0]))
+    opti.subject_to(psi_e[0, 0] == X[2, 0] - X_p[2, 0])
+    opti.subject_to(error_tp[:,0] == vertcat(e_p[:,0], psi_e[:,0]))
+
 
     # Dynamics constraints
     for k in range(N):
+        
+        # Set Up Vehicle States
         opti.subject_to(X[0, k+1] == X[0, k] + v * cos(X[2, k]) * DT)
         opti.subject_to(X[1, k+1] == X[1, k] + v * sin(X[2, k]) * DT)
-        opti.subject_to(X[2, k+1] == X[2, k] + U[0, k] * DT)
-
-    # Example reference point (replace with your actual reference point)
-    # Set parameter values
-    opti.set_value(ref_x, 3.0)  # Example value for reference x position
-    opti.set_value(ref_y, 3.0)  # Example value for reference y position
+        opti.subject_to(X[2, k+1] == X[2, k] + r[0, k] * DT)
+        
+        # Set Up Point States
+        opti.subject_to(X_p[0, k+1] == X_p[0, k])
+        opti.subject_to(X_p[1, k+1] == X_p[1, k])
+        opti.subject_to(X_p[2, k+1] == X_p[2, k])
+        
+        # Set Up Errors
+        opti.subject_to(e_p[:, k+1] == vertcat(horzcat(cos(X_p[2, k+1]), sin(X_p[2, k+1])), horzcat(-sin(X_p[2, k+1]), cos(X_p[2, k+1]))) @ (X[0:2, k+1] - X_p[0:2, k+1]))
+        opti.subject_to(psi_e[0, k+1] == X[2, k+1] - X_p[2, k+1])
+        opti.subject_to(error_tp[:, k+1] == vertcat(e_p[:, k+1], psi_e[:, k+1]))
+        
+        
     
-    # Objective (minimize the distance to the reference point)
-    cost = sqrt((X[0, N] - ref_x)**2 + (X[1, N] - ref_y)**2)
+        
+    # Objective Function to minimise
+    
+    # sqrt((sum1(e_p[:, N]) + psi_e[0, N])**2
+    cost = sqrt((sum1(e_p[:, N]) + psi_e[0, N])**2) # (X[0, N] - X_p[0, N])**2 + (X[1, N] - X_p[1, N])**2 + (X[2, N] - X_p[2, N])**2
     opti.minimize(cost)
 
-    # Bounds on control (angular velocity limit)
+    # Bounds on control (angular velocity of the vehicle and speed of the reference point limits)
     for k in range(N):
-        opti.subject_to(-1.0 <= U[0, k])
-        opti.subject_to(U[0, k] <= 1.0)
+        opti.subject_to(opti.bounded(-1.0, r[0,k], 1.0))
+        opti.subject_to(opti.bounded(0.0, v_p[0,k], 1.5)) # has to be able to be '<= 0' and '> v'.
 
     # Solve the optimization problem
     opti.solver('ipopt')
@@ -173,14 +209,16 @@ def main(args=None):
     
     # Set initial guess for state and control
     opti.set_initial(X, np.zeros((3, N+1)))  # Initialize state trajectory (zeros)
-    opti.set_initial(U, np.zeros((1, N)))    # Initialize control trajectory (zeros)
+    opti.set_initial(r, np.zeros((1, N)))    # Initialize control trajectory (zeros)
+    opti.set_initial(X_p, np.zeros((3, N+1)))
+    opti.set_initial(v_p, np.zeros((1, N)))
 
     # Solve the optimization problem
     sol = opti.solve()
 
     # Extract optimal state and control
     state_trajectory = sol.value(X)
-    control_trajectory = sol.value(U)
+    control_trajectory = sol.value(r)
 
     # Print the optimal state and control
     print("Optimal State Trajectory:")
@@ -189,7 +227,19 @@ def main(args=None):
     print("\nOptimal Control (Angular Velocity) Trajectory:")
     print(control_trajectory)
 
-
+    # Integral of first and seconds terms
+    # First term
+    # error_tp[:,0].T @ weights_Q @ error_tp[:,0] 
+    
+    # Second term
+    # u_a[:,0].T @ weights_R @ u_a[:,0]
+    u_a = vertcat(v * cos(psi_e) - pi*v_p[0, 0], r - curvature[0, 0]*pi*v_p[0, 0])
+    
+    # Third term
+    # sqrt(sum1(error_tp[:,N])**2) # Can be whatever cost I design, should probably be smaller
+    
+    
+    # integral_cost = integral((x_desired(t) - x(t))**2, t, t_start, t_end)
 
 if __name__ == '__main__':
     main()
